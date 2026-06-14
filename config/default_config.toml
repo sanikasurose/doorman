@@ -1,0 +1,25 @@
+[detection]
+fps = 5
+confidence_threshold = 0.6
+window_size = 20
+required_absent_frames = 15
+dynamic_fps_scaling = true
+
+[locking]
+absence_timeout_seconds = 30
+warning_seconds_before_lock = 10
+
+[session]
+input_grace_seconds = 60
+check_video_calls = true
+check_screensaver = true
+
+[recognition]
+enabled = true
+tolerance = 0.6
+
+[logging]
+level = "INFO"
+log_file = "~/.doorman/doorman.log"
+max_log_size_mb = 10
+backup_count = 3

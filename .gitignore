@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# Runtime data (never commit these)
+*.pkl
+*.jsonl
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# Environment
+.env
+.claude/

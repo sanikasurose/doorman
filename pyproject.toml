@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "doorman"
+version = "0.1.0"
+description = "macOS presence-based screen locker"
+requires-python = ">=3.11"
+dependencies = [
+    "mediapipe",
+    "numpy",
+    "opencv-python",
+    "face_recognition",
+    "typer",
+    "rumps",
+    "pyobjc-framework-Quartz",
+    "pyobjc-framework-IOKit",
+    "tomli-w",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-mock",
+]
+
+[project.scripts]
+doorman = "cli.cli:app"
+
+[tool.hatchling.build.targets.wheel]
+packages = ["doorman", "cli", "menubar"]
