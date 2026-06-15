@@ -14,8 +14,7 @@ dependencies = [
     "face_recognition",
     "typer",
     "rumps",
-    "pyobjc-framework-Quartz",
-    "pyobjc-framework-IOKit",
+    "pyobjc",
     "tomli-w",
 ]
 

@@ -109,3 +109,13 @@ Not `pmset displaysleepnow`.
 **Decision:** `main.py` instantiates all modules and passes them where needed. Modules do not instantiate each other.
 
 **Reason:** Keeps modules independently testable. `test_state_machine.py` can instantiate `StateMachine` directly with no camera or macOS dependencies. `test_detector.py` can mock the camera at the OpenCV level without touching the FSM. If modules instantiated their own dependencies, unit testing would require mocking at a much deeper level.
+
+---
+
+## Known Limitation — KL-001: `send_warning()` uses a static countdown
+
+**Current behaviour (Day 3):** `main.py` calls `notifier.send_warning(config.locking.warning_seconds_before_lock)` — a fixed value from config (default: 10 seconds). The notification always says "10 seconds" regardless of how much time has actually elapsed since the FSM entered WARNING.
+
+**Why this is acceptable now:** A single macOS notification fires once per WARNING entry (the FSM's `_warning_sent` flag ensures it). The notification is accurate at the moment it fires — it is sent exactly when `time_remaining <= warning_seconds_before_lock`, so the displayed value is correct at that instant.
+
+**What to fix in Day 9:** The menubar app will display a live countdown by reading `warning_countdown` from `~/.doorman/status.json` (already written correctly by the FSM each tick). The notification itself can remain static. If a richer "updating notification" is ever wanted, `send_warning()` should accept the live elapsed time from the FSM tick and compute remaining seconds there rather than using the config value.
