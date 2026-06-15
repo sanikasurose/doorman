@@ -9,10 +9,15 @@ from pathlib import Path
 from doorman.config import ConfigError, load_config
 from doorman.detector import CameraUnavailableError, Detector
 from doorman.logger import setup_logger
-from doorman.state_machine import Action, StateMachine
+from doorman.locker import lock
+from doorman.notifier import send_cancelled, send_warning
+from doorman.state_machine import Action, State, StateMachine
 
 _CONFIG_PATH = Path("~/.doorman/config.toml").expanduser()
 _STATUS_FILE = Path("~/.doorman/status.json").expanduser()
+
+_SCALED_FPS = 2          # reduced poll rate after stable presence
+_SCALE_AFTER_SECONDS = 120  # 2 minutes of continuous MONITORING before scaling
 
 
 def main() -> None:
@@ -52,7 +57,13 @@ def main() -> None:
         required_absent_frames=config.detection.required_absent_frames,
     )
 
-    sleep_interval = 1.0 / config.detection.fps
+    configured_interval = 1.0 / config.detection.fps
+    scaled_interval = 1.0 / _SCALED_FPS
+    sleep_interval = configured_interval
+
+    monitoring_entered_at: float | None = None
+    prev_state: State | None = None
+
     logger.info("Detection loop starting at %d FPS", config.detection.fps)
 
     try:
@@ -71,12 +82,15 @@ def main() -> None:
                 pause=False,
             )
 
-            if action == Action.SEND_LOCK:
-                logger.info("Action: SEND_LOCK (not yet wired — Day 3)")
-            elif action == Action.SEND_WARNING:
-                logger.info("Action: SEND_WARNING (not yet wired — Day 3)")
+            # --- Action dispatch ---
+            if action == Action.SEND_WARNING:
+                send_warning(config.locking.warning_seconds_before_lock)
+            elif action == Action.SEND_LOCK:
+                success = lock()
+                # stats.record_lock() — not yet implemented (Day 10)
+                logger.info("Lock event recorded (stats not yet wired — Day 10), success=%s", success)
             elif action == Action.CANCEL_WARNING:
-                logger.info("Action: CANCEL_WARNING")
+                send_cancelled()
 
             logger.debug(
                 "state=%s faces=%s confidence=%.2f",
@@ -85,7 +99,22 @@ def main() -> None:
                 getattr(detection, "confidence", 0.0),
             )
 
+            # --- Dynamic FPS scaling (ADR-002 companion) ---
+            if state == State.MONITORING:
+                if prev_state != State.MONITORING:
+                    monitoring_entered_at = time.monotonic()
+                stable_for = time.monotonic() - (monitoring_entered_at or time.monotonic())
+                sleep_interval = (
+                    scaled_interval if stable_for >= _SCALE_AFTER_SECONDS else configured_interval
+                )
+            else:
+                # Any non-MONITORING state: restore configured FPS and reset timer
+                monitoring_entered_at = None
+                sleep_interval = configured_interval
+
+            prev_state = state
             time.sleep(sleep_interval)
+
     except KeyboardInterrupt:
         logger.info("Shutting down on KeyboardInterrupt")
     finally:
