@@ -85,6 +85,23 @@ class Detector:
             bounding_boxes=boxes,
         )
 
+    def is_available(self) -> bool:
+        """Return True if the camera handle is open."""
+        return self._cap.isOpened()
+
+    def retry_camera(self) -> bool:
+        """Attempt to re-open the camera. Returns True on success."""
+        self._cap.release()
+        self._cap = cv2.VideoCapture(0)
+        if not self._cap.isOpened():
+            return False
+        try:
+            self._health_check()
+            return True
+        except CameraUnavailableError:
+            self._cap.release()
+            return False
+
     def release(self) -> None:
         """Release the OpenCV camera handle."""
         self._cap.release()

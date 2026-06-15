@@ -86,6 +86,7 @@ class StateMachine:
     def _transition(self, detection, recognition, session, pause: bool) -> tuple[State, Action]:
         camera_ok = detection is not None
         faces_found = camera_ok and getattr(detection, "faces_found", False)
+        suppressed = session is not None and getattr(session, "suppress", False)
         now = datetime.now(timezone.utc)
 
         # Pause is honoured from any state except INITIALIZING and LOCKED
@@ -106,7 +107,11 @@ class StateMachine:
             case State.MONITORING:
                 if not camera_ok:
                     return State.CAMERA_UNAVAILABLE, Action.NO_OP
-                self._presence_window.append(faces_found)
+                # Session suppression counts as presence — don't start countdown.
+                if suppressed or faces_found:
+                    self._presence_window.append(True)
+                    return State.MONITORING, Action.NO_OP
+                self._presence_window.append(False)
                 absent_count = self._presence_window.count(False)
                 if absent_count < self._required_absent_frames:
                     return State.MONITORING, Action.NO_OP
@@ -119,7 +124,8 @@ class StateMachine:
                 if not camera_ok:
                     self._warning_entered_at = None
                     return State.CAMERA_UNAVAILABLE, Action.CANCEL_WARNING
-                if faces_found:
+                # Face returned or session suppression: cancel countdown.
+                if faces_found or suppressed:
                     self._warning_entered_at = None
                     self._warning_sent = False
                     self._presence_window.clear()

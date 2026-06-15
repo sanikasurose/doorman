@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from doorman.config import ConfigError, load_config
@@ -11,13 +12,36 @@ from doorman.detector import CameraUnavailableError, Detector
 from doorman.logger import setup_logger
 from doorman.locker import lock
 from doorman.notifier import send_cancelled, send_warning
+from doorman.session_guard import SessionGuard
 from doorman.state_machine import Action, State, StateMachine
 
 _CONFIG_PATH = Path("~/.doorman/config.toml").expanduser()
 _STATUS_FILE = Path("~/.doorman/status.json").expanduser()
+_PAUSE_FILE = Path("~/.doorman/pause").expanduser()
 
-_SCALED_FPS = 2          # reduced poll rate after stable presence
-_SCALE_AFTER_SECONDS = 120  # 2 minutes of continuous MONITORING before scaling
+_SCALED_FPS = 2              # reduced poll rate after stable presence
+_SCALE_AFTER_SECONDS = 120   # 2 minutes of continuous MONITORING before scaling
+
+_CAMERA_BACKOFF_INITIAL = 30.0   # seconds between first retry attempts
+_CAMERA_BACKOFF_MAX = 300.0      # cap at 5 minutes
+
+
+def _check_pause() -> bool:
+    """Read the pause flag file and return whether the daemon should be paused."""
+    if not _PAUSE_FILE.exists():
+        return False
+    content = _PAUSE_FILE.read_text().strip()
+    if not content:
+        return True  # empty file = indefinite pause
+    try:
+        expiry = datetime.fromisoformat(content)
+        if datetime.now(timezone.utc) >= expiry.astimezone(timezone.utc):
+            _PAUSE_FILE.unlink(missing_ok=True)
+            return False
+        return True
+    except ValueError:
+        logger.warning("Pause file contains malformed timestamp %r — treating as indefinite pause", content)
+        return True
 
 
 def main() -> None:
@@ -47,6 +71,8 @@ def main() -> None:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 
+    session_guard = SessionGuard(config)
+
     fsm = StateMachine(
         absence_timeout_seconds=config.locking.absence_timeout_seconds,
         warning_seconds_before_lock=config.locking.warning_seconds_before_lock,
@@ -64,22 +90,54 @@ def main() -> None:
     monitoring_entered_at: float | None = None
     prev_state: State | None = None
 
+    # Camera backoff state
+    camera_next_retry_at: float = 0.0
+    camera_retry_interval: float = _CAMERA_BACKOFF_INITIAL
+
     logger.info("Detection loop starting at %d FPS", config.detection.fps)
 
     try:
         while True:
-            try:
-                detection = detector.detect()
-            except Exception as exc:
-                logger.warning("detect() raised unexpectedly: %s", exc)
-                detection = None
+            pause = _check_pause()
 
-            # Recognition and session guard are None until their phases are built.
+            # --- Camera backoff retry when unavailable ---
+            state = fsm.state
+            if state == State.CAMERA_UNAVAILABLE:
+                now_mono = time.monotonic()
+                if now_mono >= camera_next_retry_at:
+                    if detector.retry_camera():
+                        logger.info("Camera recovered after retry")
+                        camera_retry_interval = _CAMERA_BACKOFF_INITIAL
+                        camera_next_retry_at = 0.0
+                    else:
+                        logger.info(
+                            "Camera retry failed — next attempt in %.0fs",
+                            camera_retry_interval,
+                        )
+                        camera_next_retry_at = now_mono + camera_retry_interval
+                        camera_retry_interval = min(
+                            camera_retry_interval * 2, _CAMERA_BACKOFF_MAX
+                        )
+
+            # --- Detection ---
+            detection = None
+            if state != State.CAMERA_UNAVAILABLE or detector.is_available():
+                try:
+                    detection = detector.detect()
+                except Exception as exc:
+                    logger.warning("detect() raised unexpectedly: %s", exc)
+
+            # --- Session guard ---
+            guard = session_guard.check()
+            if guard.suppress:
+                logger.debug("Suppressing lock — reason: %s", guard.reason)
+
+            # --- FSM tick ---
             state, action = fsm.tick(
                 detection=detection,
                 recognition=None,
-                session=None,
-                pause=False,
+                session=guard,
+                pause=pause,
             )
 
             # --- Action dispatch ---
@@ -87,19 +145,21 @@ def main() -> None:
                 send_warning(config.locking.warning_seconds_before_lock)
             elif action == Action.SEND_LOCK:
                 success = lock()
-                # stats.record_lock() — not yet implemented (Day 10)
-                logger.info("Lock event recorded (stats not yet wired — Day 10), success=%s", success)
+                logger.info(
+                    "Lock event recorded (stats not yet wired — Day 10), success=%s", success
+                )
             elif action == Action.CANCEL_WARNING:
                 send_cancelled()
 
             logger.debug(
-                "state=%s faces=%s confidence=%.2f",
+                "state=%s faces=%s confidence=%.2f suppress=%s",
                 state.name,
                 getattr(detection, "faces_found", None),
                 getattr(detection, "confidence", 0.0),
+                guard.suppress,
             )
 
-            # --- Dynamic FPS scaling (ADR-002 companion) ---
+            # --- Dynamic FPS scaling ---
             if state == State.MONITORING:
                 if prev_state != State.MONITORING:
                     monitoring_entered_at = time.monotonic()
@@ -107,8 +167,9 @@ def main() -> None:
                 sleep_interval = (
                     scaled_interval if stable_for >= _SCALE_AFTER_SECONDS else configured_interval
                 )
+            elif state == State.PAUSED:
+                sleep_interval = 1.0  # 1 FPS in PAUSED state
             else:
-                # Any non-MONITORING state: restore configured FPS and reset timer
                 monitoring_entered_at = None
                 sleep_interval = configured_interval
 
