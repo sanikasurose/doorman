@@ -9,7 +9,7 @@ from dataclasses import dataclass
 logger = logging.getLogger("doorman.session_guard")
 
 # Process names to match against (lowercased). pgrep is case-insensitive by default on macOS.
-_VIDEO_CALL_PROCESSES = ["zoom.us", "Microsoft Teams", "FaceTime", "Google Chrome"]
+_VIDEO_CALL_PROCESSES = ["zoom.us", "Microsoft Teams", "FaceTime"]
 
 
 @dataclass
@@ -45,18 +45,20 @@ class SessionGuard:
 # ---------------------------------------------------------------------------
 
 def _hid_idle_seconds() -> float | None:
-    """Return seconds since last HID event using IOKit via pyobjc (Quartz binding)."""
+    """Return seconds since last user HID event via IOKit IOHIDSystem (nanoseconds → seconds)."""
     try:
-        from Quartz import (  # type: ignore[import]
-            CGEventSourceSecondsSinceLastEventType,
-            kCGAnyInputEventType,
-            kCGEventSourceStateHIDSystemState,
+        result = subprocess.run(
+            ["ioreg", "-c", "IOHIDSystem"],
+            capture_output=True,
+            text=True,
+            timeout=2,
         )
-        idle = CGEventSourceSecondsSinceLastEventType(
-            kCGEventSourceStateHIDSystemState,
-            kCGAnyInputEventType,
-        )
-        return float(idle)
+        for line in result.stdout.splitlines():
+            if "HIDIdleTime" in line:
+                ns = int(line.split("=")[-1].strip())
+                return ns / 1e9
+        logger.warning("HIDIdleTime not found in ioreg output")
+        return None
     except Exception as exc:
         logger.warning("HID idle time unavailable: %s", exc)
         return None
@@ -75,6 +77,20 @@ def _video_call_active() -> bool:
                 return True
         except Exception as exc:
             logger.warning("pgrep check for '%s' failed: %s", name, exc)
+
+    # Google Meet: only suppress if Chrome has a meet.google.com window open,
+    # not whenever Chrome is running.
+    try:
+        result = subprocess.run(
+            ["pgrep", "-if", "meet.google.com"],
+            capture_output=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            return True
+    except Exception as exc:
+        logger.warning("pgrep check for Google Meet failed: %s", exc)
+
     return False
 
 
